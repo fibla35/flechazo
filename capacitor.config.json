@@ -1,0 +1,8 @@
+{
+  "appId": "com.fibla.flechazo",
+  "appName": "Flechazo",
+  "webDir": "www",
+  "android": {
+    "backgroundColor": "#f39ab9"
+  }
+}
