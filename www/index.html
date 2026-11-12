@@ -369,16 +369,23 @@ function tryGen(p,rng){
   let filled=0,usedPortal=false,usedMirror=false,usedBox=false;
   const avail=act.length-taken.size,target=Math.max(3,Math.round(avail*p.fill));
   const free=i=>mask[i]&&occ[i]<0&&!taken.has(i);
+  const bias=p.bias||0,cov=new Int16Array(N);
   const place=(cells,d)=>{const id=arrows.length;for(const c of cells)occ[c]=id;
     const r=trace(W,H,pm,mm,occ,cells[0],d,ext);
     if(!r.ok){for(const c of cells)occ[c]=-1;return false;}
-    if(r.jumps)usedPortal=true;if(r.bounces)usedMirror=true;if(boxes&&r.pts.some(c=>boxSet.has(c)))usedBox=true;arrows.push({id,cells,dir:d});filled+=cells.length;return true;};
+    if(r.jumps)usedPortal=true;if(r.bounces)usedMirror=true;if(boxes&&r.pts.some(c=>boxSet.has(c)))usedBox=true;for(const c of r.pts)if(c>=0)cov[c]++;arrows.push({id,cells,dir:d});filled+=cells.length;return true;};
   let tries=0;const maxTries=avail*30;
+  // dificultad: con «bias» las flechas nuevas se colocan sobre los caminos de otras (cadenas de bloqueos más largas)
+  const bodyFor=(h,d,L)=>{const cells=[h];let x=h%W,y=(h/W)|0;for(let i=1;i<L;i++){x-=DX[d];y-=DY[d];if(x<0||y<0||x>=W||y>=H)break;const c=y*W+x;if(!free(c))break;cells.push(c);}return cells;};
+  const probe=(cells,d)=>{for(const c of cells)occ[c]=9999;const r=trace(W,H,pm,mm,occ,cells[0],d,ext);for(const c of cells)occ[c]=-1;return r.ok?r.pts.length+1:0;};
   while(filled<target&&tries<maxTries){
-    tries++;const h=act[(rng()*act.length)|0];if(!free(h))continue;
-    const d=(rng()*4)|0;let L=1;if(rng()<p.longP)L=2+((rng()*(p.maxLen-1))|0);
-    const cells=[h];let x=h%W,y=(h/W)|0;
-    for(let i=1;i<L;i++){x-=DX[d];y-=DY[d];if(x<0||y<0||x>=W||y>=H)break;const c=y*W+x;if(!free(c))break;cells.push(c);}
+    tries++;let h;
+    if(rng()<bias){let best=-1;for(let k=0;k<6;k++){const c=act[(rng()*act.length)|0];if(!free(c))continue;if(best<0||cov[c]>cov[best]||(cov[c]===cov[best]&&rng()<.5))best=c;}if(best<0)continue;h=best;}
+    else{h=act[(rng()*act.length)|0];if(!free(h))continue;}
+    let L=1;if(rng()<p.longP)L=2+((rng()*(p.maxLen-1))|0);
+    let d=(rng()*4)|0,cells;
+    if(rng()<bias){let bl=0,bd=-1,bc=null;for(const dd of shuffle([0,1,2,3],rng)){const cc=bodyFor(h,dd,L),len=probe(cc,dd);if(len>bl){bl=len;bd=dd;bc=cc;}}if(bd<0)continue;d=bd;cells=bc;}
+    else cells=bodyFor(h,d,L);
     if(L>1&&cells.length<2&&rng()<0.7)continue;
     place(cells,d);
   }
@@ -465,16 +472,25 @@ function solve(lv,s0,limit=40000){
   return rec(s0?cloneState(s0):newState(lv))?seq:null;
 }
 
+// dureza = media de flechas libres / flechas que quedan a lo largo de la solución (menos = más difícil)
+function hardness(lv){const s=newState(lv);let sum=0,k=0;for(const id of lv.solution){if(!s.alive[id])continue;sum+=freeMoves(lv,s).length/s.left;k++;doExit(lv,s,id);}return k?sum/k:1;}
 function generateLevel(p,seed){
+  let best=null,got=0;const want=p.cands||1;
   for(let at=0;at<60;at++){const lv=tryGen(p,mulberry32(hash32(seed+'#'+at)));if(!lv)continue;
-    const sol=solve(lv);if(sol){lv.solution=sol;lv.seed=seed;lv.attempt=at;return lv;}}
+    const sol=solve(lv);if(!sol)continue;lv.solution=sol;lv.seed=seed;lv.attempt=at;
+    if(want>1)lv.hard=hardness(lv);if(!best||lv.hard<best.hard)best=lv;if(++got>=want)break;}
+  if(best)return best;
   const q=Object.assign({},p,{bombs:0,ice:0,rot:0,portal:false});
   for(let at=0;at<300;at++){const lv=tryGen(q,mulberry32(hash32(seed+'#f'+at)));
     if(lv){const sol=solve(lv);if(sol){lv.solution=sol;lv.seed=seed;lv.fallback=true;return lv;}}}
   throw new Error('No se pudo generar '+seed);
 }
-function makeLevel(n){return generateLevel(levelParams(n),'L'+n);}
-function makeDaily(ds){return generateLevel(dailyParams(ds),'D'+ds);}
+const DIFFS={facil:{size:-1,fill:-.06,bias:0,cands:1},normal:{size:0,fill:0,bias:.35,cands:1},dificil:{size:1,fill:.03,bias:.75,cands:2},experto:{size:1,fill:.05,bias:.95,cands:4}};
+function applyDiff(p,diff){const D=DIFFS[diff]||DIFFS.normal,q=Object.assign({},p);
+  if(!p.n||p.n>10){q.W=Math.max(4,Math.min(12,p.W+D.size));q.H=Math.max(5,Math.min(15,p.H+D.size));}
+  q.fill=Math.max(.4,Math.min(.92,p.fill+D.fill));q.bias=(p.n&&p.n<=3)?0:D.bias;q.cands=D.cands;q.diff=diff;return q;}
+function makeLevel(n,diff='dificil'){return generateLevel(applyDiff(levelParams(n),diff),'L'+n+(diff==='normal'?'':'_'+diff));}
+function makeDaily(ds){return generateLevel(applyDiff(dailyParams(ds),'dificil'),'D'+ds);}
 function makeZen(seed){return generateLevel(zenParams(seed),'Z'+seed);}
 /*CORE-END*/
 
@@ -517,7 +533,7 @@ const clone=o=>JSON.parse(JSON.stringify(o));
 const SAVE_KEY='flechazo_v1';
 const DEF={level:1,coins:150,inv:{hint:3,hammer:2,undo:3,magnet:1},trBest:0,stars:0,three:0,arrows:0,bombs:0,thaw:0,portals:0,rots:0,win:0,bestWin:0,
   daily:{},login:{last:'',streak:0,best:0,claimed:''},zen:0,noHelp:0,bosses:0,heart1:0,ach:{},seen:{},
-  set:{sound:1,music:1,vib:1,dirc:1,cb:0,mstyle:'relax'},ev:{}};
+  set:{sound:1,music:1,vib:1,dirc:1,cb:0,mstyle:'relax',diff:'dificil'},ev:{}};
 function merge(a,b){for(const k in b){if(b[k]&&typeof b[k]==='object'&&!Array.isArray(b[k])&&a[k]&&typeof a[k]==='object')merge(a[k],b[k]);else a[k]=b[k];}return a;}
 function load(){try{const t=localStorage.getItem(SAVE_KEY);if(t)return merge(clone(DEF),JSON.parse(t));}catch(e){}return clone(DEF);}
 let S=load();
@@ -704,7 +720,7 @@ function renderHome(){
   const tl=$('#hTime');tl.classList.toggle('lock',S.level<=30);
   $('#hMuralName').textContent=muralName(mi.base,mi.v)+' · '+mi.count+'/16';$('#hMuralBar').style.width=`calc(${mi.count/16*100}% + 12px)`;
   $('#hPlay').textContent='Nivel '+S.level;
-  const p=levelParams(S.level);$('#hTag').innerHTML=p.boss?ic('i_crown')+' Nivel jefe':p.hard?ic('i_bolt')+' Nivel difícil':'';
+  const p=levelParams(S.level),dn=(DIFF_INFO[S.set.diff]||DIFF_INFO.dificil)[0];$('#hTag').innerHTML=(p.boss?ic('i_crown')+' Nivel jefe · ':p.hard?ic('i_bolt')+' Nivel difícil · ':'')+'Modo '+dn;
   $('#hDailyDot').classList.toggle('on',!S.daily[today()]);
   const ev=evState();$('#hEvImg').src=A[EV_THEMES[ev.theme][1]];$('#hEvDot').classList.toggle('on',!S.ev.done||(S.ev.done&&!S.ev.claimed));
 }
@@ -826,11 +842,14 @@ const SETS=[['sound','Sonido','i_sound'],['music','Música','i_music'],['vib','V
 function renderSettings(){
   const bs=S.set.bgSel||'auto',bn=bs==='auto'?'Automático':bs.startsWith('bg')?BG_NAMES[+bs.slice(2)]:MURALS[+bs.slice(1)].name;
   $('#setBody').innerHTML=SETS.map(([k,n,i])=>`<div class="set">${ic(i,'')}${n}<button class="tog ${S.set[k]?'on':''}" data-k="${k}"></button></div>`).join('')+
+   `<div class="set" style="flex-wrap:wrap">${ic('i_bolt','')}Dificultad<div class="row" style="width:100%;margin-top:4px;gap:4px">${Object.entries(DIFF_INFO).map(([k,[n,h,m]])=>`<button class="btn ${S.set.diff===k?'pink':'white'} dfb" data-k="${k}" style="min-height:42px;border-width:12px 14px;font-size:13px">${n}</button>`).join('')}</div>
+     <small style="width:100%;opacity:.7;font-weight:700;margin-top:4px">${({facil:'5 corazones, tableros abiertos · monedas ×0,75',normal:'3 corazones · monedas ×1',dificil:'3 corazones, más bloqueos encadenados · monedas ×1,25',experto:'2 corazones, tableros muy enrevesados · monedas ×1,6'})[S.set.diff]}</small></div>`+
    `<div class="set" style="flex-wrap:wrap">${ic('i_music','')}Estilo musical<div class="row" style="width:100%;margin-top:4px;gap:4px">${MSTYLES.map(([k,n])=>`<button class="btn ${S.set.mstyle===k?'pink':'white'} mst" data-k="${k}" style="min-height:42px;border-width:12px 14px;font-size:13px">${n}</button>`).join('')}</div></div>`+
    `<div class="set">${ic('i_gallery','')}Fondo: ${bn}<button class="btn white" id="sBg" style="margin-left:auto;min-height:44px;border-width:14px 18px;font-size:14px">Cambiar</button></div>`+
    `<p class="note" style="margin:10px 6px">Colores por dirección: arriba azul, derecha rosa, abajo naranja, izquierda verde. Desactívalo para jugar con un solo color (más difícil).</p>
     <div class="row"><button class="btn gray" id="sReset">Borrar progreso</button></div><p class="note" style="text-align:center">Flechazo v1 · guardado automático en este dispositivo</p>`;
   $('#setBody').querySelectorAll('.tog').forEach(b=>b.onclick=()=>{const k=b.dataset.k;S.set[k]=S.set[k]?0:1;save();b.classList.toggle('on',!!S.set[k]);SFX.click();});
+  $('#setBody').querySelectorAll('.dfb').forEach(b=>b.onclick=()=>{S.set.diff=b.dataset.k;save();SFX.click();renderSettings();});
   $('#setBody').querySelectorAll('.mst').forEach(b=>b.onclick=()=>{S.set.mstyle=b.dataset.k;if(!S.set.music)S.set.music=1;mStep=0;save();renderSettings();});
   $('#sBg').onclick=()=>{SFX.click();openBgPicker();};
   $('#sReset').onclick=()=>modal(`<div class="ribbon">¿Borrar todo?</div><p>Perderás niveles, murales, monedas y logros. No se puede deshacer.</p>
@@ -872,10 +891,12 @@ function buildBoard(){
   if(lv.mirrors)for(const[cI,t]of lv.mirrors){const[x,y]=cxy(cI);g.save();g.translate(x,y);if(t===1)g.scale(-1,1);g.drawImage(IM.s_mirror,-CS*.46,-CS*.46,CS*.92,CS*.92);g.restore();}
   BOARD=c;
 }
+const DIFF_INFO={facil:['Fácil',5,.75],normal:['Normal',3,1],dificil:['Difícil',3,1.25],experto:['Experto',2,1.6]};
 function startGame(mode,sameLv){
   let lv;
-  if(sameLv)lv=sameLv;else if(mode==='level')lv=makeLevel(S.level);else if(mode==='daily')lv=makeDaily(today());else if(mode==='time')lv=makeTimeBoard(0);else lv=makeZen((Date.now()%1e9)+S.zen);
-  G={mode,n:mode==='level'?S.level:0,ds:today(),lv,s:newState(lv),hearts:3,crashes:0,combo:0,usedHelp:false,anims:[],parts:[],
+  if(sameLv)lv=sameLv;else if(mode==='level')lv=makeLevel(S.level,S.set.diff);else if(mode==='daily')lv=makeDaily(today());else if(mode==='time')lv=makeTimeBoard(0);else lv=makeZen((Date.now()%1e9)+S.zen);
+  const MH=mode==='level'?(DIFF_INFO[S.set.diff]||DIFF_INFO.dificil)[1]:3;
+  G={mode,n:mode==='level'?S.level:0,ds:today(),lv,s:newState(lv),hearts:MH,maxH:MH,crashes:0,combo:0,usedHelp:false,anims:[],parts:[],
      vis:lv.arrows.map(a=>({ang:a.dir*90,crash:0,amp:0,shake:0,thaw:0,dizzy:0})),over:false,hintId:-1,hammer:false,shake:0,
      free:{hint:0,hammer:0,undo:0,magnet:0},tut:null,iceTold:0,starBonus:false,timeLeft:90,score:0,lastSec:-1};
   initExtras();
@@ -898,7 +919,7 @@ function hud(){
   else if(G.mode==='daily'){$('#gLevel').textContent='Reto diario';$('#gSub').textContent=G.ds.split('-').reverse().join('/');}
   else if(G.mode==='time'){$('#gLevel').textContent='Contrarreloj';$('#gSub').textContent='Tableros: '+G.score+' · récord '+S.trBest;}
   else{$('#gLevel').textContent='Zen';$('#gSub').textContent='Tablero '+(S.zen+1)+' · sin corazones';}
-  $('#gHearts').innerHTML=G.mode==='zen'?ic('i_zen'):G.mode==='time'?ic('i_timer')+'<span id="gTime">'+Math.ceil(G.timeLeft)+'</span>':[0,1,2].map(i=>ic(i<G.hearts?'i_heart':'i_heart_empty')).join('');
+  $('#gHearts').innerHTML=G.mode==='zen'?ic('i_zen'):G.mode==='time'?ic('i_timer')+'<span id="gTime">'+Math.ceil(G.timeLeft)+'</span>':[...Array(G.maxH).keys()].map(i=>ic(i<G.hearts?'i_heart':'i_heart_empty')).join('');
   for(const[k,id]of[['hint','cHint'],['hammer','cHammer'],['undo','cUndo'],['magnet','cMagnet']]){const e=$('#'+id),f=G.free[k];e.textContent=f?'+'+f:S.inv[k];e.classList.toggle('free',!!f);}
   $('#bHammer').classList.toggle('act',G.hammer);
 }
@@ -1039,7 +1060,7 @@ $('#bHammer').onclick=()=>{if(!G||G.over)return;if(G.hammer){G.hammer=false;bubb
   G.hammer=true;bubble('Toca la flecha que quieras romper');SFX.click();hud();};
 $('#bUndo').onclick=()=>{if(!G||G.over)return;if(G.mode==='zen'||G.mode==='time'){toast('En este modo no hay corazones','i_undo');return;}
   if(G.crashes<=0){toast('No hay ningún choque que deshacer','i_undo');return;}if(!have('undo')){openShop();return;}
-  consume('undo');G.crashes--;G.hearts=Math.min(3,G.hearts+1);G.usedHelp=true;SFX.coin();hud();toast('Choque deshecho: +1 corazón','i_heart');
+  consume('undo');G.crashes--;G.hearts=Math.min(G.maxH,G.hearts+1);G.usedHelp=true;SFX.coin();hud();toast('Choque deshecho: +1 corazón','i_heart');
   const r=$('#gHearts').getBoundingClientRect(),c=cv.getBoundingClientRect();spriteFx('fx_hearts',r.left-c.left+r.width/2,Math.max(10,r.bottom-c.top),70,.7);};
 $('#bMagnet').onclick=()=>{if(!G||G.over)return;if(G.hammer){G.hammer=false;bubble('');}
   if(!have('magnet')){openShop();return;}const fr=freeMoves(G.lv,G.s);if(!fr.length){toast('Ahora mismo no hay flechas libres','i_magnet');return;}
@@ -1068,7 +1089,7 @@ function winLevel(){
     if(all&&!prev)coins+=500;S.coins+=coins;save();checkAch();
     setTimeout(()=>G===g0&&modal(`<div class="ribbon">¡Reto superado!</div>${starsHtml(stars)}<div class="coins">+${coins} ${ic('i_coin')}</div>${all?'<p>¡Mes completo! +500 monedas</p>':''}
       <div class="row"><button class="btn pink" id="vHome">Volver</button></div>`,c=>{c.querySelector('#vHome').onclick=()=>{closeModal();G=null;show('daily');};}),500);return;}
-  const n=G.n,p=lv.p;let coins=10+stars*5;if(p.hard)coins*=2;if(p.boss){coins*=3;S.bosses++;}if(G.starBonus){coins+=50;S.stars++;}
+  const n=G.n,p=lv.p;let coins=Math.round((10+stars*5)*(DIFF_INFO[S.set.diff]||DIFF_INFO.dificil)[2]);if(p.hard)coins*=2;if(p.boss){coins*=3;S.bosses++;}if(G.starBonus){coins+=50;S.stars++;}
   const evT=EV_THEMES[weekInfo().theme][3];if(lv.arrows.some(a=>a[evT])||(evT==='portal'&&lv.portal))coins+=10;evWin();
   if(stars===3)S.three++;S.win++;S.bestWin=Math.max(S.bestWin,S.win);if(!G.usedHelp)S.noHelp++;if(G.hearts===1)S.heart1++;
   const mi=muralInfo(n),newCount=mi.count+1,complete=newCount===16;if(complete)coins+=100;
